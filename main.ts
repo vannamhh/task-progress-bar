@@ -9,11 +9,16 @@ import {
 	PluginSettingTab,
 	Setting,
 	MetadataCache,
-	Vault
+	Vault,
 } from "obsidian";
 
-// Increased wait time for file sync
-const FILE_SYNC_WAIT_TIME = 10000; // 10 seconds wait for file sync
+// Timing constants
+const NORMAL_UPDATE_DELAY = 300; // ms for regular updates
+const TASK_UPDATE_DELAY = 3000; // 3 seconds for task updates
+const READING_VIEW_UPDATE_DELAY = 1500; // 1.5 seconds for reading view updates
+
+// View type constant
+const VIEW_TYPE_PROGRESS_BAR = "progress-bar-view";
 
 interface ProgressBarSettings {
 	barColor: string;
@@ -29,25 +34,33 @@ const DEFAULT_SETTINGS: ProgressBarSettings = {
 
 export default class ProgressBarPlugin extends Plugin {
 	settings: ProgressBarSettings;
-	private updateTimeout: NodeJS.Timeout | null = null;
-	private lastFileContent: string = "";
-	private lastFile: string | null = null;
+	private view: ProgressBarView | null = null;
+	private updateTimer: NodeJS.Timeout | null = null; // Fixed type to match setTimeout return type
+	private lastFileContent: string | null = null;
+	private lastFilePath: string | null = null;
+	private isTaskUpdate = false; // Removed redundant type annotation
+	private isReadingView = false; // Removed redundant type annotation
+
 	private vault: Vault;
 	private metadataCache: MetadataCache;
 
 	async onload() {
 		console.log("Loading Progress Bar Sidebar plugin");
-		
+
 		// Store references to vault and metadata cache for easier access
 		this.vault = this.app.vault;
 		this.metadataCache = this.app.metadataCache;
 
 		await this.loadSettings();
 
-		// Register view type
+		// Load styles
+		this.loadStyles();
+
+		// Register the custom view
 		this.registerView(
-			"progress-bar-view",
-			(leaf) => new ProgressBarView(leaf, this)
+			VIEW_TYPE_PROGRESS_BAR,
+			(leaf: WorkspaceLeaf) =>
+				(this.view = new ProgressBarView(leaf, this))
 		);
 
 		// Add icon to ribbon menu
@@ -79,15 +92,14 @@ export default class ProgressBarPlugin extends Plugin {
 		});
 
 		// Activate view when layout is ready
-		this.app.workspace.onLayoutReady(() => {
-			this.activateView();
-		});
+		this.app.workspace.onLayoutReady(this.initLeaf.bind(this));
 
 		// Register for file changes
 		this.registerEvent(
 			this.app.workspace.on("file-open", (file) => {
 				if (file) {
-					this.lastFile = file.path;
+					this.lastFilePath = file.path;
+					this.checkViewMode();
 					this.scheduleUpdate();
 				}
 			})
@@ -97,7 +109,8 @@ export default class ProgressBarPlugin extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on("editor-change", (editor, view) => {
 				if (view && view.file) {
-					this.lastFile = view.file.path;
+					this.lastFilePath = view.file.path;
+					this.isReadingView = false; // We're in editor mode
 					// Get content directly from editor for immediate feedback
 					this.lastFileContent = editor.getValue();
 					this.scheduleUpdate(false, true);
@@ -113,8 +126,17 @@ export default class ProgressBarPlugin extends Plugin {
 				target.matches('input[type="checkbox"]');
 
 			if (isCheckbox || target.closest("li.task-list-item")) {
-				// Force a full refresh after checkbox clicks
+				// Check if we're in reading view
+				this.checkViewMode();
+				// Force a refresh after checkbox clicks
 				this.scheduleUpdate(true);
+
+				// For reading view, schedule additional updates to catch delayed changes
+				if (this.isReadingView) {
+					// Schedule multiple updates at different intervals
+					setTimeout(() => this.scheduleUpdate(true), 1000);
+					setTimeout(() => this.scheduleUpdate(true), 2500);
+				}
 			}
 		});
 
@@ -123,11 +145,19 @@ export default class ProgressBarPlugin extends Plugin {
 			this.metadataCache.on("changed", (file) => {
 				const activeFile = this.app.workspace.getActiveFile();
 				if (activeFile && activeFile.path === file.path) {
-					this.lastFile = file.path;
+					this.lastFilePath = file.path;
 					// Clear cached content to force a fresh read
 					this.lastFileContent = "";
-					this.scheduleUpdate(true);
+					this.scheduleUpdate();
 				}
+			})
+		);
+
+		// Listen for layout changes to detect reading/editing mode switches
+		this.registerEvent(
+			this.app.workspace.on("layout-change", () => {
+				this.checkViewMode();
+				this.scheduleUpdate();
 			})
 		);
 
@@ -135,17 +165,100 @@ export default class ProgressBarPlugin extends Plugin {
 		this.addSettingTab(new ProgressBarSettingTab(this.app, this));
 	}
 
+	// Load CSS styles
+	loadStyles() {
+		// Create a style element and add the CSS content directly
+		const styleEl = document.createElement("style");
+		styleEl.id = "progress-bar-sidebar-styles";
+
+		// Add all the CSS styles inline
+		styleEl.textContent = `
+			/* Progress Bar Sidebar Plugin Styles */
+			.progress-bar-view {
+				padding: 10px !important;
+				height: 120px !important;
+				overflow: hidden !important;
+			}
+			
+			.progress-bar-view .bar-container {
+				background-color: #e0e0e0;
+				border-radius: 4px;
+				margin: 10px 0;
+				overflow: hidden;
+			}
+			
+			.progress-bar-view .bar {
+				height: 100%;
+				transition: width 0.3s ease;
+			}
+			
+			.progress-bar-view .progress-label {
+				font-weight: bold;
+				text-align: center;
+				margin: 5px 0;
+			}
+			
+			.progress-bar-view .task-count-info {
+				text-align: center;
+				font-size: 0.9em;
+				color: var(--text-muted);
+			}
+			
+			.progress-bar-view .no-tasks-info {
+				text-align: center;
+				color: var(--text-muted);
+				margin-top: 20px;
+			}
+			
+			.progress-bar-view .error-message {
+				color: var(--text-error);
+				padding: 10px;
+				border: 1px solid var(--background-modifier-error);
+				border-radius: 4px;
+				margin-top: 10px;
+			}
+		`;
+
+		// Add the style element to the document head
+		document.head.appendChild(styleEl);
+
+		// Register cleanup to remove styles when plugin is unloaded
+		this.register(() => styleEl.remove());
+	}
+
+	// Check if we're in reading view or editing view
+	private checkViewMode() {
+		const isReading =
+			document.querySelector(".markdown-reading-view") !== null;
+		if (isReading !== this.isReadingView) {
+			this.isReadingView = isReading;
+			// Clear cached content when switching modes
+			this.lastFileContent = "";
+		}
+	}
+
 	// Improved update scheduler
 	scheduleUpdate(forceSync = false, useEditorContent = false) {
 		// Clear any existing timeout
-		if (this.updateTimeout) {
-			clearTimeout(this.updateTimeout);
+		if (this.updateTimer) {
+			clearTimeout(this.updateTimer);
+		}
+
+		// Determine appropriate delay based on context
+		let delay = NORMAL_UPDATE_DELAY;
+
+		if (forceSync) {
+			// Task updates need more time
+			delay = TASK_UPDATE_DELAY;
+		} else if (this.isReadingView && !useEditorContent) {
+			// Reading view updates need a moderate delay
+			delay = READING_VIEW_UPDATE_DELAY;
 		}
 
 		// Set a new timeout with appropriate delay
-		this.updateTimeout = setTimeout(() => {
+		this.updateTimer = setTimeout(() => {
 			this.updateProgressBar(useEditorContent);
-		}, forceSync ? FILE_SYNC_WAIT_TIME : 500);
+		}, delay);
 	}
 
 	// Count tasks in content
@@ -179,21 +292,23 @@ export default class ProgressBarPlugin extends Plugin {
 	}
 
 	// Improved file content retrieval
-	private async getFileContent(useEditorContent = false): Promise<{ file: TFile | null; content: string }> {
+	private async getFileContent(
+		useEditorContent = false
+	): Promise<{ file: TFile | null; content: string }> {
 		const currentFile = this.app.workspace.getActiveFile();
-		
+
 		// If no file is open, return empty content
 		if (!currentFile) {
 			return { file: null, content: "" };
 		}
 
 		// For editor view, get content directly from editor if requested
-		if (useEditorContent) {
+		if (useEditorContent && !this.isReadingView) {
 			const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
 			if (mdView?.editor && mdView.file === currentFile) {
-				return { 
-					file: currentFile, 
-					content: mdView.editor.getValue() 
+				return {
+					file: currentFile,
+					content: mdView.editor.getValue(),
 				};
 			}
 		}
@@ -205,7 +320,10 @@ export default class ProgressBarPlugin extends Plugin {
 		} catch (e) {
 			console.warn("Error reading file:", e);
 			// Fallback to cached content if available
-			if (this.lastFile === currentFile.path && this.lastFileContent) {
+			if (
+				this.lastFilePath === currentFile.path &&
+				this.lastFileContent
+			) {
 				return { file: currentFile, content: this.lastFileContent };
 			}
 			// Last resort - try cached read
@@ -223,13 +341,16 @@ export default class ProgressBarPlugin extends Plugin {
 	async updateProgressBar(useEditorContent = false) {
 		try {
 			// Get progress bar views
-			const leaves = this.app.workspace.getLeavesOfType("progress-bar-view");
+			const leaves =
+				this.app.workspace.getLeavesOfType(VIEW_TYPE_PROGRESS_BAR);
 			if (leaves.length === 0) {
 				return;
 			}
 
 			// Get file content and count tasks
-			const { file, content } = await this.getFileContent(useEditorContent);
+			const { file, content } = await this.getFileContent(
+				useEditorContent
+			);
 			if (!file) {
 				// No file open, update views to show "no file" message
 				for (const leaf of leaves) {
@@ -243,7 +364,7 @@ export default class ProgressBarPlugin extends Plugin {
 
 			// Cache the content for future use
 			this.lastFileContent = content;
-			this.lastFile = file.path;
+			this.lastFilePath = file.path;
 
 			// Count tasks
 			const { total, completed } = this.countTasks(content);
@@ -263,19 +384,19 @@ export default class ProgressBarPlugin extends Plugin {
 
 	async onunload() {
 		// Clear any pending timeout
-		if (this.updateTimeout) {
-			clearTimeout(this.updateTimeout);
+		if (this.updateTimer) {
+			clearTimeout(this.updateTimer);
 		}
 
 		console.log("Unloading Progress Bar Sidebar plugin");
-		this.app.workspace.detachLeavesOfType("progress-bar-view");
+		this.app.workspace.detachLeavesOfType(VIEW_TYPE_PROGRESS_BAR);
 	}
 
 	async activateView() {
 		const { workspace } = this.app;
 
 		// Check if view already exists
-		const leaves = workspace.getLeavesOfType("progress-bar-view");
+		const leaves = workspace.getLeavesOfType(VIEW_TYPE_PROGRESS_BAR);
 		if (leaves.length > 0) {
 			workspace.revealLeaf(leaves[0]);
 			return;
@@ -296,7 +417,7 @@ export default class ProgressBarPlugin extends Plugin {
 
 		// Set up view
 		await leaf.setViewState({
-			type: "progress-bar-view",
+			type: VIEW_TYPE_PROGRESS_BAR,
 			active: true,
 		});
 
@@ -318,12 +439,15 @@ export default class ProgressBarPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
+
+	private initLeaf() {
+		this.activateView();
+	}
 }
 
 // Simple view class for displaying progress
 class ProgressBarView extends View {
 	plugin: ProgressBarPlugin;
-	private fileNameEl: HTMLElement | null = null;
 	private progressContainerEl: HTMLElement | null = null;
 	contentEl: HTMLElement;
 
@@ -343,68 +467,12 @@ class ProgressBarView extends View {
 			this.contentEl.empty();
 			this.contentEl.addClass("progress-bar-view");
 
-			// Add some CSS for better styling
-			this.contentEl.createEl("style", {
-				text: `
-					.progress-bar-view {
-						padding: 10px;
-					}
-					.progress-bar-title {
-						margin-top: 0;
-						margin-bottom: 15px;
-						text-align: center;
-					}
-					.file-name {
-						font-weight: bold;
-						margin-bottom: 10px;
-						word-break: break-word;
-					}
-					.bar-container {
-						height: ${this.plugin.settings.barHeight}px;
-						background-color: #e0e0e0;
-						border-radius: 4px;
-						margin: 10px 0;
-						overflow: hidden;
-					}
-					.bar {
-						height: 100%;
-						background-color: ${this.plugin.settings.barColor};
-						transition: width 0.3s ease;
-					}
-					.progress-label {
-						font-weight: bold;
-						text-align: center;
-						margin: 5px 0;
-					}
-					.task-count-info {
-						text-align: center;
-						font-size: 0.9em;
-						color: var(--text-muted);
-					}
-					.no-file-info, .no-tasks-info {
-						text-align: center;
-						color: var(--text-muted);
-						margin-top: 20px;
-					}
-					.error-message {
-						color: var(--text-error);
-						padding: 10px;
-						border: 1px solid var(--background-modifier-error);
-						border-radius: 4px;
-						margin-top: 10px;
-					}
-				`
-			});
+			// Apply dynamic styles based on settings
+			this.applyDynamicStyles();
 
-			// Create fixed elements
-			this.contentEl.createEl("h4", {
-				text: "Task Progress",
-				cls: "progress-bar-title",
-			});
-
-			// Create elements to be updated later
-			this.fileNameEl = this.contentEl.createDiv("file-info");
-			this.progressContainerEl = this.contentEl.createDiv("progress-container");
+			// Create element to be updated later
+			this.progressContainerEl =
+				this.contentEl.createDiv("progress-container");
 
 			// Initial state when no file is open
 			this.showNoFileMessage();
@@ -422,12 +490,38 @@ class ProgressBarView extends View {
 		}
 	}
 
+	// Apply dynamic styles that depend on settings
+	private applyDynamicStyles() {
+		// Create or update dynamic style element
+		let styleEl = document.getElementById("progress-bar-dynamic-styles");
+		if (!styleEl) {
+			styleEl = document.createElement("style");
+			styleEl.id = "progress-bar-dynamic-styles";
+			document.head.appendChild(styleEl);
+		}
+
+		// Set dynamic styles based on settings
+		styleEl.textContent = `
+			.progress-bar-view .bar-container {
+				height: ${this.plugin.settings.barHeight}px;
+			}
+			.progress-bar-view .bar {
+				background-color: ${this.plugin.settings.barColor};
+				height: ${this.plugin.settings.barHeight}px;
+			}
+		`;
+	}
+
 	async onClose(): Promise<void> {
-		// Nothing special needed here
+		// Remove dynamic styles when view is closed
+		const styleEl = document.getElementById("progress-bar-dynamic-styles");
+		if (styleEl) {
+			styleEl.remove();
+		}
 	}
 
 	getViewType(): string {
-		return "progress-bar-view";
+		return VIEW_TYPE_PROGRESS_BAR;
 	}
 
 	getDisplayText(): string {
@@ -439,35 +533,22 @@ class ProgressBarView extends View {
 	}
 
 	showNoFileMessage(): void {
-		if (!this.fileNameEl || !this.progressContainerEl) return;
-
-		this.fileNameEl.empty();
-		this.fileNameEl.createEl("div", {
-			text: "No file open",
-			cls: "file-name",
-		});
+		if (!this.progressContainerEl) return;
 
 		this.progressContainerEl.empty();
 		this.progressContainerEl.createEl("div", {
 			text: "Open a file to view task progress",
-			cls: "no-file-info",
+			cls: "no-tasks-info",
 		});
 	}
 
 	updateProgress(file: TFile, totalTasks: number, completedTasks: number) {
 		// Ensure UI elements exist
-		if (!this.fileNameEl || !this.progressContainerEl || !this.contentEl) {
+		if (!this.progressContainerEl || !this.contentEl) {
 			return;
 		}
 
 		try {
-			// Update file name
-			this.fileNameEl.empty();
-			this.fileNameEl.createEl("div", {
-				text: file.name,
-				cls: "file-name",
-			});
-
 			// Update progress container
 			this.progressContainerEl.empty();
 
@@ -482,18 +563,10 @@ class ProgressBarView extends View {
 			const percent = Math.round((completedTasks / totalTasks) * 100);
 
 			// Create progress bar
-			const barContainer = this.progressContainerEl.createDiv("bar-container");
+			const barContainer =
+				this.progressContainerEl.createDiv("bar-container");
 			const bar = barContainer.createDiv("bar");
 			bar.style.width = `${percent}%`;
-
-			// Apply settings
-			if (this.plugin.settings.barColor) {
-				bar.style.backgroundColor = this.plugin.settings.barColor;
-			}
-			if (this.plugin.settings.barHeight) {
-				barContainer.style.height = `${this.plugin.settings.barHeight}px`;
-				bar.style.height = `${this.plugin.settings.barHeight}px`;
-			}
 
 			// Add percentage label
 			this.progressContainerEl.createEl("div", {
@@ -518,7 +591,6 @@ class ProgressBarView extends View {
 		if (!this.contentEl) return;
 
 		this.contentEl.empty();
-		this.contentEl.createEl("h4", { text: "Task Progress" });
 		this.contentEl.createEl("div", {
 			text: `Error: ${error?.message || "Unknown error"}`,
 			cls: "error-message",

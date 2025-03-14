@@ -1,54 +1,53 @@
-# Progress Bar Sidebar cho Obsidian
+# Progress Bar Sidebar for Obsidian
 
-Plugin này hiển thị thanh tiến độ trực quan cho các công việc trong tệp Markdown của bạn ngay trên sidebar của Obsidian.
+This plugin displays a visual progress bar for tasks in your Markdown files directly on the Obsidian sidebar.
 
+## Features
 
-## Tính năng
+- 📊 **Displays visual progress bar** for tasks in the current file
+- 🔢 **Shows completion percentage** and number of completed tasks
+- ⚡ **Updates in real-time** when you check or uncheck tasks
+- 📱 **Works in all viewing modes** (edit mode and reading mode)
+- 🎨 **Customizable** colors and height of the progress bar
 
-- 📊 **Hiển thị thanh tiến độ trực quan** cho các công việc trong tệp hiện tại
-- 🔢 **Hiển thị tỉ lệ phần trăm hoàn thành** và số lượng công việc đã hoàn thành 
-- ⚡ **Cập nhật theo thời gian thực** khi bạn tích hoặc bỏ tích các công việc
-- 📱 **Hoạt động trong mọi chế độ xem** (chế độ chỉnh sửa và chế độ đọc)
-- 🎨 **Tùy chỉnh** màu sắc và chiều cao của thanh tiến độ
+## Installation
 
-## Cài đặt
+### Install from Community Plugins
 
-### Cài đặt từ Community Plugins
+1. Open Obsidian
+2. Go to Settings > Community plugins
+3. Disable Safe Mode if it's enabled
+4. Click "Browse" and search for "Progress Bar Sidebar"
+5. Install the plugin and activate it
 
-1. Mở Obsidian
-2. Vào Settings (Cài đặt) > Community plugins (Plugin cộng đồng)
-3. Tắt Safe Mode (Chế độ an toàn) nếu đang bật
-4. Nhấn "Browse" (Duyệt) và tìm kiếm "Progress Bar Sidebar"
-5. Cài đặt plugin và kích hoạt
+### Manual Installation
 
-### Cài đặt thủ công
+1. Create a folder `progress-bar-sidebar` in `.obsidian/plugins/`
+2. Copy all plugin files into that folder
+3. Restart Obsidian and activate the plugin in Settings > Community plugins
 
-1. Tạo thư mục `progress-bar-sidebar` trong `.obsidian/plugins/`
-2. Sao chép tất cả các tệp của plugin vào thư mục đó
-3. Khởi động lại Obsidian và kích hoạt plugin trong Settings > Community plugins
+## How to Use
 
-## Cách sử dụng
+1. Click on the bar chart icon in the sidebar or use the "Show Task Progress Bar" command
+2. Open a Markdown file containing task lists
+3. The progress bar will automatically display the completion ratio of tasks
 
-1. Nhấp vào biểu tượng biểu đồ thanh trong sidebar hoặc sử dụng lệnh "Show Task Progress Bar" 
-2. Mở một tệp Markdown có chứa danh sách công việc
-3. Thanh tiến độ sẽ tự động hiển thị tỉ lệ hoàn thành của các công việc
+The plugin automatically tracks changes in the file and updates the progress bar when you check or uncheck tasks, both in edit mode and reading mode.
 
-Plugin tự động theo dõi các thay đổi trong tệp và cập nhật thanh tiến trình khi bạn tích hoặc bỏ tích các công việc, cả trong chế độ chỉnh sửa và chế độ đọc.
+### Supported Task Syntax
 
-### Cú pháp công việc được hỗ trợ
-
-Plugin hỗ trợ cú pháp công việc chuẩn của Markdown và Obsidian:
+The plugin supports standard Markdown and Obsidian task syntax:
 
 ```markdown
-- [ ] Công việc chưa hoàn thành
-- [x] Công việc đã hoàn thành
-- [X] Cũng là công việc đã hoàn thành
-- [/] Công việc đang thực hiện
-- [-] Công việc đã hủy
-- [>] Công việc đã hoãn lại
+- [ ] Uncompleted task
+- [x] Completed task
+- [X] Also a completed task
+- [/] In-progress task
+- [-] Cancelled task
+- [>] Deferred task
 ```
 
-## Khắc phục sự cố
+## Troubleshooting
 
-Nếu progress bar không hiển thị chính xác trong Reading View, vui lòng đợi vài giây để plugin tự động đồng bộ trạng thái. Plugin đã được thiết kế để tự động phát hiện và sửa lỗi không nhất quán giữa giao diện và nội dung file.
+If the progress bar doesn't display correctly in Reading View, please wait a few seconds for the plugin to automatically synchronize the state. The plugin is designed to automatically detect and fix inconsistencies between the interface and file content.
 

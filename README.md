@@ -33,9 +33,22 @@ Plugin này hiển thị thanh tiến độ trực quan cho các công việc tr
 2. Mở một tệp Markdown có chứa danh sách công việc
 3. Thanh tiến độ sẽ tự động hiển thị tỉ lệ hoàn thành của các công việc
 
-Plugin tự động theo dõi các thay đổi trong tệp và cập nhật thanh tiến độ khi bạn tích hoặc bỏ tích các công việc.
+Plugin tự động theo dõi các thay đổi trong tệp và cập nhật thanh tiến trình khi bạn tích hoặc bỏ tích các công việc, cả trong chế độ chỉnh sửa và chế độ đọc.
 
 ### Cú pháp công việc được hỗ trợ
 
 Plugin hỗ trợ cú pháp công việc chuẩn của Markdown và Obsidian:
+
+```markdown
+- [ ] Công việc chưa hoàn thành
+- [x] Công việc đã hoàn thành
+- [X] Cũng là công việc đã hoàn thành
+- [/] Công việc đang thực hiện
+- [-] Công việc đã hủy
+- [>] Công việc đã hoãn lại
+```
+
+## Khắc phục sự cố
+
+Nếu progress bar không hiển thị chính xác trong Reading View, vui lòng đợi vài giây để plugin tự động đồng bộ trạng thái. Plugin đã được thiết kế để tự động phát hiện và sửa lỗi không nhất quán giữa giao diện và nội dung file.
 

@@ -1,8 +1,106 @@
-/*
+/* Styles for Progress Bar View */
+.progress-bar-view {
+  padding: 16px;
+}
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.progress-bar-view h4.progress-bar-title {
+  margin-top: 0;
+  margin-bottom: 16px;
+  font-size: 16px;
+  text-align: center;
+  color: var(--text-normal);
+}
 
-If your plugin does not need CSS, delete this file.
+.file-info {
+  margin-bottom: 20px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
 
-*/
+.file-name {
+  font-weight: bold;
+  font-size: 0.9em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.goal-path {
+  font-size: 0.9em;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+}
+
+.config-info {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+/* Container for the progress bar */
+.bar-container {
+  margin: 15px 0;
+  background-color: var(--background-modifier-border);
+  border-radius: 6px;
+  height: 12px;
+  overflow: hidden;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* The actual progress bar */
+.bar {
+  height: 100%;
+  background-color: #738bd7; /* Default color */
+  border-radius: 6px;
+  transition: width 0.5s ease;
+}
+
+/* Progress percentage display */
+.progress-label {
+  text-align: center;
+  font-size: 14px;
+  font-weight: bold;
+  margin-top: 8px;
+  color: var(--text-normal);
+}
+
+/* Task count info */
+.task-count-info {
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.no-tasks-info, .no-file-info {
+  text-align: center;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 20px 0;
+}
+
+.error-message {
+  color: var(--text-error);
+  text-align: center;
+  padding: 10px;
+  background-color: var(--background-modifier-error-rgb);
+  background-color: rgba(var(--background-modifier-error-rgb), 0.2);
+  border-radius: 5px;
+  margin: 10px 0;
+}
+
+.info-container {
+  margin-top: 15px;
+}
+
+.view-name, .view-params {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+
+.progress-container {
+  margin-top: 20px;
+}

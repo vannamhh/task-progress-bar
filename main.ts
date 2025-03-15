@@ -15,7 +15,7 @@ import {
 // Timing constants
 const NORMAL_UPDATE_DELAY = 300; // ms for regular updates
 const TASK_UPDATE_DELAY = 3000; // 3 seconds for task updates
-const READING_VIEW_UPDATE_DELAY = 1500; // 1.5 seconds for reading view updates
+const READING_VIEW_UPDATE_DELAY = 200; // Reduced from 500ms to 200ms for faster reading view updates
 
 // View type constant
 const VIEW_TYPE_PROGRESS_BAR = "progress-bar-view";
@@ -24,27 +24,46 @@ interface ProgressBarSettings {
 	barColor: string;
 	barHeight: number;
 	showTaskCount: boolean;
+	debounceTime?: number;
+	readingViewDelay?: number;
+	useColorStates: boolean; // Add option to use color states
+	lowProgressColor: string; // Red for low progress
+	mediumProgressColor: string; // Orange for medium progress
+	highProgressColor: string; // Green for high progress
 }
 
 const DEFAULT_SETTINGS: ProgressBarSettings = {
 	barColor: "#5e81ac",
 	barHeight: 20,
 	showTaskCount: true,
+	debounceTime: 300,
+	readingViewDelay: 200, // Reduced from 500ms to 200ms for faster updates
+	useColorStates: false, // Disabled by default to maintain backward compatibility
+	lowProgressColor: "#e06c75", // Red
+	mediumProgressColor: "#e5c07b", // Orange/Yellow
+	highProgressColor: "#98c379", // Green
 };
+
+// Task counting regex - defined once for better performance
+const TASK_LINE_REGEX = /^\s*[-*+] \[([ xX#\->/])\](?!\()/gm;
 
 export default class ProgressBarPlugin extends Plugin {
 	settings: ProgressBarSettings;
 	private view: ProgressBarView | null = null;
-	private updateTimer: NodeJS.Timeout | null = null; // Fixed type to match setTimeout return type
-	private lastFileContent: string | null = null;
-	private lastFilePath: string | null = null;
-	private isTaskUpdate = false; // Removed redundant type annotation
-	private isReadingView = false; // Removed redundant type annotation
+	private updateTimer: NodeJS.Timeout | null = null;
+	private fileCache = new Map<
+		string,
+		{ content: string; timestamp: number }
+	>();
+	private isReadingView = false;
 
 	private vault: Vault;
 	private metadataCache: MetadataCache;
 
-	async onload() {
+	// Debounced update handler
+	private debouncedUpdate: (...args: any[]) => void;
+
+	async onload(): Promise<void> {
 		console.log("Loading Progress Bar Sidebar plugin");
 
 		// Store references to vault and metadata cache for easier access
@@ -53,7 +72,18 @@ export default class ProgressBarPlugin extends Plugin {
 
 		await this.loadSettings();
 
-		// Load styles
+		// Initialize the debounced update function after settings are loaded
+		// Fix: Ensure we always have a number by using a more definitive approach
+		const debounceTime =
+			this.settings.debounceTime !== undefined &&
+			typeof this.settings.debounceTime === "number"
+				? this.settings.debounceTime
+				: DEFAULT_SETTINGS.debounceTime;
+
+		this.debouncedUpdate = this.debounce((useEditorContent = false) => {
+			this.updateProgressBar(useEditorContent);
+		}, debounceTime ?? 300);
+
 		this.loadStyles();
 
 		// Register the custom view
@@ -67,25 +97,21 @@ export default class ProgressBarPlugin extends Plugin {
 		this.addRibbonIcon(
 			"bar-chart-horizontal",
 			"Show Task Progress Bar",
-			async () => {
-				await this.activateView();
-			}
+			this.activateView.bind(this)
 		);
 
 		// Add command to show progress bar
 		this.addCommand({
 			id: "show-task-progress-bar",
 			name: "Show Task Progress Bar",
-			callback: async () => {
-				await this.activateView();
-			},
+			callback: this.activateView.bind(this),
 		});
 
 		// Add command to refresh progress bar
 		this.addCommand({
 			id: "refresh-task-progress-bar",
 			name: "Refresh Task Progress Bar",
-			callback: async () => {
+			callback: () => {
 				new Notice("Refreshing progress bar...");
 				this.scheduleUpdate(true);
 			},
@@ -94,151 +120,173 @@ export default class ProgressBarPlugin extends Plugin {
 		// Activate view when layout is ready
 		this.app.workspace.onLayoutReady(this.initLeaf.bind(this));
 
+		this.registerEventHandlers();
+
+		// Add settings tab
+		this.addSettingTab(new ProgressBarSettingTab(this.app, this));
+	}
+
+	// Separate event handlers for better organization
+	private registerEventHandlers(): void {
 		// Register for file changes
 		this.registerEvent(
 			this.app.workspace.on("file-open", (file) => {
 				if (file) {
-					this.lastFilePath = file.path;
 					this.checkViewMode();
 					this.scheduleUpdate();
 				}
 			})
 		);
 
-		// Register for editor changes
+		// Register for editor changes - optimized with debounce
 		this.registerEvent(
 			this.app.workspace.on("editor-change", (editor, view) => {
-				if (view && view.file) {
-					this.lastFilePath = view.file.path;
-					this.isReadingView = false; // We're in editor mode
-					// Get content directly from editor for immediate feedback
-					this.lastFileContent = editor.getValue();
-					this.scheduleUpdate(false, true);
+				if (view?.file) {
+					this.isReadingView = false;
+					// Cache file content
+					const content = editor.getValue();
+					this.fileCache.set(view.file.path, {
+						content,
+						timestamp: Date.now(),
+					});
+					this.debouncedUpdate(true);
 				}
 			})
 		);
 
-		// Handle checkbox clicks with a more robust approach
-		this.registerDomEvent(document, "click", (evt: MouseEvent) => {
-			const target = evt.target as HTMLElement;
-			const isCheckbox =
-				target.matches(".task-list-item-checkbox") ||
-				target.matches('input[type="checkbox"]');
+		// Handle checkbox clicks
+		this.registerDomEvent(
+			document,
+			"click",
+			this.handleCheckboxClick.bind(this)
+		);
 
-			if (isCheckbox || target.closest("li.task-list-item")) {
-				// Check if we're in reading view
-				this.checkViewMode();
-				// Force a refresh after checkbox clicks
-				this.scheduleUpdate(true);
-
-				// For reading view, schedule additional updates to catch delayed changes
-				if (this.isReadingView) {
-					// Schedule multiple updates at different intervals
-					setTimeout(() => this.scheduleUpdate(true), 1000);
-					setTimeout(() => this.scheduleUpdate(true), 2500);
-				}
-			}
-		});
-
-		// Listen for metadata changes - this is crucial for reading view
+		// Listen for metadata changes
 		this.registerEvent(
 			this.metadataCache.on("changed", (file) => {
 				const activeFile = this.app.workspace.getActiveFile();
-				if (activeFile && activeFile.path === file.path) {
-					this.lastFilePath = file.path;
+				if (activeFile?.path === file.path) {
 					// Clear cached content to force a fresh read
-					this.lastFileContent = "";
+					this.fileCache.delete(file.path);
 					this.scheduleUpdate();
 				}
 			})
 		);
 
-		// Listen for layout changes to detect reading/editing mode switches
+		// Listen for layout changes
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => {
 				this.checkViewMode();
 				this.scheduleUpdate();
 			})
 		);
+	}
 
-		// Add settings tab
-		this.addSettingTab(new ProgressBarSettingTab(this.app, this));
+	// Improved debounce implementation
+	private debounce(
+		callback: Function,
+		wait: number
+	): (...args: any[]) => void {
+		let timeout: NodeJS.Timeout | null = null;
+		return (...args: any[]) => {
+			if (timeout) clearTimeout(timeout);
+			timeout = setTimeout(() => {
+				callback(...args);
+			}, wait);
+		};
+	}
+
+	// Dedicated handler for checkbox clicks
+	private handleCheckboxClick(evt: MouseEvent): void {
+		const target = evt.target as HTMLElement;
+		const isCheckbox =
+			target.matches(".task-list-item-checkbox") ||
+			target.matches('input[type="checkbox"]');
+
+		if (isCheckbox || target.closest("li.task-list-item")) {
+			this.checkViewMode();
+			this.scheduleUpdate(true);
+
+			if (this.isReadingView) {
+				// Use shorter timeouts for better responsiveness in reading view
+				setTimeout(() => this.scheduleUpdate(true), 100); // Reduced from 300ms to 100ms
+				setTimeout(() => this.scheduleUpdate(true), 400); // Reduced from 800ms to 400ms
+			}
+		}
 	}
 
 	// Load CSS styles
-	loadStyles() {
-		// Create a style element and add the CSS content directly
+	loadStyles(): void {
 		const styleEl = document.createElement("style");
 		styleEl.id = "progress-bar-sidebar-styles";
 
-		// Add all the CSS styles inline
 		styleEl.textContent = `
-			/* Progress Bar Sidebar Plugin Styles */
-			.progress-bar-view {
-				padding: 10px !important;
-				height: 120px !important;
-				overflow: hidden !important;
-			}
-			
-			.progress-bar-view .bar-container {
-				background-color: #e0e0e0;
-				border-radius: 4px;
-				margin: 10px 0;
-				overflow: hidden;
-			}
-			
-			.progress-bar-view .bar {
-				height: 100%;
-				transition: width 0.3s ease;
-			}
-			
-			.progress-bar-view .progress-label {
-				font-weight: bold;
-				text-align: center;
-				margin: 5px 0;
-			}
-			
-			.progress-bar-view .task-count-info {
-				text-align: center;
-				font-size: 0.9em;
-				color: var(--text-muted);
-			}
-			
-			.progress-bar-view .no-tasks-info {
-				text-align: center;
-				color: var(--text-muted);
-				margin-top: 20px;
-			}
-			
-			.progress-bar-view .error-message {
-				color: var(--text-error);
-				padding: 10px;
-				border: 1px solid var(--background-modifier-error);
-				border-radius: 4px;
-				margin-top: 10px;
-			}
-		`;
+            /* Progress Bar Sidebar Plugin Styles */
+            .progress-bar-view {
+                padding: 10px !important;
+                height: 120px !important;
+                overflow: hidden !important;
+            }
+            
+            .progress-bar-view .bar-container {
+                background-color: var(--background-secondary);
+                border-radius: 4px;
+                margin: 10px 0;
+                overflow: hidden;
+            }
+            
+            .progress-bar-view .bar {
+                height: 100%;
+                transition: width 0.3s ease;
+            }
+            
+            .progress-bar-view .progress-label {
+                font-weight: bold;
+                text-align: center;
+                margin: 5px 0;
+            }
+            
+            .progress-bar-view .task-count-info {
+                text-align: center;
+                font-size: 0.9em;
+                color: var(--text-muted);
+            }
+            
+            .progress-bar-view .no-tasks-info {
+                text-align: center;
+                color: var(--text-muted);
+                margin-top: 20px;
+            }
+            
+            .progress-bar-view .error-message {
+                color: var(--text-error);
+                padding: 10px;
+                border: 1px solid var(--background-modifier-error);
+                border-radius: 4px;
+                margin-top: 10px;
+            }
+        `;
 
-		// Add the style element to the document head
 		document.head.appendChild(styleEl);
-
-		// Register cleanup to remove styles when plugin is unloaded
 		this.register(() => styleEl.remove());
 	}
 
 	// Check if we're in reading view or editing view
-	private checkViewMode() {
+	private checkViewMode(): void {
 		const isReading =
 			document.querySelector(".markdown-reading-view") !== null;
 		if (isReading !== this.isReadingView) {
 			this.isReadingView = isReading;
-			// Clear cached content when switching modes
-			this.lastFileContent = "";
+			// Clear file cache when switching modes
+			const activeFile = this.app.workspace.getActiveFile();
+			if (activeFile) {
+				this.fileCache.delete(activeFile.path);
+			}
 		}
 	}
 
 	// Improved update scheduler
-	scheduleUpdate(forceSync = false, useEditorContent = false) {
+	scheduleUpdate(forceSync = false, useEditorContent = false): void {
 		// Clear any existing timeout
 		if (this.updateTimer) {
 			clearTimeout(this.updateTimer);
@@ -248,11 +296,9 @@ export default class ProgressBarPlugin extends Plugin {
 		let delay = NORMAL_UPDATE_DELAY;
 
 		if (forceSync) {
-			// Task updates need more time
-			delay = TASK_UPDATE_DELAY;
+			delay = this.isReadingView ? 100 : TASK_UPDATE_DELAY; // Use much shorter delay for reading view
 		} else if (this.isReadingView && !useEditorContent) {
-			// Reading view updates need a moderate delay
-			delay = READING_VIEW_UPDATE_DELAY;
+			delay = this.settings.readingViewDelay || READING_VIEW_UPDATE_DELAY;
 		}
 
 		// Set a new timeout with appropriate delay
@@ -261,28 +307,21 @@ export default class ProgressBarPlugin extends Plugin {
 		}, delay);
 	}
 
-	// Count tasks in content
+	// Optimized task counting function
 	countTasks(content: string): { total: number; completed: number } {
 		if (!content) {
 			return { total: 0, completed: 0 };
 		}
 
-		// Improved regex for Obsidian task format
-		const taskLineRegex = /^\s*[-*+] \[([ xX#\->/])\](?!\()/gm;
-
 		try {
-			const matches = [...content.matchAll(taskLineRegex)];
-			const total = matches.length;
-			let completed = 0;
+			// Reset regex lastIndex to ensure it starts from beginning
+			TASK_LINE_REGEX.lastIndex = 0;
 
-			for (const match of matches) {
-				// Get character inside brackets
-				const checkChar = match[1];
-				// Consider completed if not a space
-				if (checkChar !== " ") {
-					completed++;
-				}
-			}
+			const matches = Array.from(content.matchAll(TASK_LINE_REGEX));
+			const total = matches.length;
+			const completed = matches.filter(
+				(match) => match[1] !== " "
+			).length;
 
 			return { total, completed };
 		} catch (e) {
@@ -291,7 +330,7 @@ export default class ProgressBarPlugin extends Plugin {
 		}
 	}
 
-	// Improved file content retrieval
+	// Improved file content retrieval with caching
 	private async getFileContent(
 		useEditorContent = false
 	): Promise<{ file: TFile | null; content: string }> {
@@ -302,30 +341,47 @@ export default class ProgressBarPlugin extends Plugin {
 			return { file: null, content: "" };
 		}
 
+		const filePath = currentFile.path;
+		const cachedData = this.fileCache.get(filePath);
+		const cacheMaxAge = 2000; // 2 seconds cache validity
+
+		// Use cached content if it's recent enough
+		if (
+			cachedData &&
+			Date.now() - cachedData.timestamp < cacheMaxAge &&
+			!this.isReadingView
+		) {
+			return { file: currentFile, content: cachedData.content };
+		}
+
 		// For editor view, get content directly from editor if requested
 		if (useEditorContent && !this.isReadingView) {
 			const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
 			if (mdView?.editor && mdView.file === currentFile) {
-				return {
-					file: currentFile,
-					content: mdView.editor.getValue(),
-				};
+				const content = mdView.editor.getValue();
+				// Update cache
+				this.fileCache.set(filePath, {
+					content,
+					timestamp: Date.now(),
+				});
+				return { file: currentFile, content };
 			}
 		}
 
 		try {
-			// Always read directly from vault for most accurate content
+			// Read directly from vault for most accurate content
 			const content = await this.vault.read(currentFile);
+			// Update cache
+			this.fileCache.set(filePath, { content, timestamp: Date.now() });
 			return { file: currentFile, content };
 		} catch (e) {
 			console.warn("Error reading file:", e);
+
 			// Fallback to cached content if available
-			if (
-				this.lastFilePath === currentFile.path &&
-				this.lastFileContent
-			) {
-				return { file: currentFile, content: this.lastFileContent };
+			if (cachedData) {
+				return { file: currentFile, content: cachedData.content };
 			}
+
 			// Last resort - try cached read
 			try {
 				const content = await this.vault.cachedRead(currentFile);
@@ -338,11 +394,12 @@ export default class ProgressBarPlugin extends Plugin {
 	}
 
 	// Main update method - improved
-	async updateProgressBar(useEditorContent = false) {
+	async updateProgressBar(useEditorContent = false): Promise<void> {
 		try {
 			// Get progress bar views
-			const leaves =
-				this.app.workspace.getLeavesOfType(VIEW_TYPE_PROGRESS_BAR);
+			const leaves = this.app.workspace.getLeavesOfType(
+				VIEW_TYPE_PROGRESS_BAR
+			);
 			if (leaves.length === 0) {
 				return;
 			}
@@ -362,10 +419,6 @@ export default class ProgressBarPlugin extends Plugin {
 				return;
 			}
 
-			// Cache the content for future use
-			this.lastFileContent = content;
-			this.lastFilePath = file.path;
-
 			// Count tasks
 			const { total, completed } = this.countTasks(content);
 
@@ -382,17 +435,20 @@ export default class ProgressBarPlugin extends Plugin {
 		}
 	}
 
-	async onunload() {
+	async onunload(): Promise<void> {
 		// Clear any pending timeout
 		if (this.updateTimer) {
 			clearTimeout(this.updateTimer);
 		}
 
+		// Clear cache
+		this.fileCache.clear();
+
 		console.log("Unloading Progress Bar Sidebar plugin");
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_PROGRESS_BAR);
 	}
 
-	async activateView() {
+	async activateView(): Promise<void> {
 		const { workspace } = this.app;
 
 		// Check if view already exists
@@ -428,7 +484,7 @@ export default class ProgressBarPlugin extends Plugin {
 		this.scheduleUpdate();
 	}
 
-	async loadSettings() {
+	async loadSettings(): Promise<void> {
 		this.settings = Object.assign(
 			{},
 			DEFAULT_SETTINGS,
@@ -436,11 +492,15 @@ export default class ProgressBarPlugin extends Plugin {
 		);
 	}
 
-	async saveSettings() {
+	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+		// Update dynamic styles when settings change
+		if (this.view) {
+			this.view.applyDynamicStyles();
+		}
 	}
 
-	private initLeaf() {
+	private initLeaf(): void {
 		this.activateView();
 	}
 }
@@ -450,6 +510,7 @@ class ProgressBarView extends View {
 	plugin: ProgressBarPlugin;
 	private progressContainerEl: HTMLElement | null = null;
 	contentEl: HTMLElement;
+	private dynamicStyleEl: HTMLStyleElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: ProgressBarPlugin) {
 		super(leaf);
@@ -483,40 +544,36 @@ class ProgressBarView extends View {
 			}, 300);
 		} catch (error) {
 			console.error("Error in onOpen:", error);
-			if (this.containerEl) {
-				const errorDiv = this.containerEl.createDiv("error");
-				errorDiv.setText(`Error: ${error.message || "Unknown"}`);
-			}
+			this.displayError(error);
 		}
 	}
 
 	// Apply dynamic styles that depend on settings
-	private applyDynamicStyles() {
+	applyDynamicStyles(): void {
 		// Create or update dynamic style element
-		let styleEl = document.getElementById("progress-bar-dynamic-styles");
-		if (!styleEl) {
-			styleEl = document.createElement("style");
-			styleEl.id = "progress-bar-dynamic-styles";
-			document.head.appendChild(styleEl);
+		if (!this.dynamicStyleEl) {
+			this.dynamicStyleEl = document.createElement("style");
+			this.dynamicStyleEl.id = "progress-bar-dynamic-styles";
+			document.head.appendChild(this.dynamicStyleEl);
 		}
 
 		// Set dynamic styles based on settings
-		styleEl.textContent = `
-			.progress-bar-view .bar-container {
-				height: ${this.plugin.settings.barHeight}px;
-			}
-			.progress-bar-view .bar {
-				background-color: ${this.plugin.settings.barColor};
-				height: ${this.plugin.settings.barHeight}px;
-			}
-		`;
+		this.dynamicStyleEl.textContent = `
+            .progress-bar-view .bar-container {
+                height: ${this.plugin.settings.barHeight}px;
+            }
+            .progress-bar-view .bar {
+                background-color: ${this.plugin.settings.barColor};
+                height: ${this.plugin.settings.barHeight}px;
+            }
+        `;
 	}
 
 	async onClose(): Promise<void> {
 		// Remove dynamic styles when view is closed
-		const styleEl = document.getElementById("progress-bar-dynamic-styles");
-		if (styleEl) {
-			styleEl.remove();
+		if (this.dynamicStyleEl) {
+			this.dynamicStyleEl.remove();
+			this.dynamicStyleEl = null;
 		}
 	}
 
@@ -542,7 +599,11 @@ class ProgressBarView extends View {
 		});
 	}
 
-	updateProgress(file: TFile, totalTasks: number, completedTasks: number) {
+	updateProgress(
+		file: TFile,
+		totalTasks: number,
+		completedTasks: number
+	): void {
 		// Ensure UI elements exist
 		if (!this.progressContainerEl || !this.contentEl) {
 			return;
@@ -568,6 +629,23 @@ class ProgressBarView extends View {
 			const bar = barContainer.createDiv("bar");
 			bar.style.width = `${percent}%`;
 
+			// Set color based on progress percentage if color states are enabled
+			if (this.plugin.settings.useColorStates) {
+				if (percent <= 33) {
+					bar.style.backgroundColor =
+						this.plugin.settings.lowProgressColor;
+				} else if (percent <= 66) {
+					bar.style.backgroundColor =
+						this.plugin.settings.mediumProgressColor;
+				} else {
+					bar.style.backgroundColor =
+						this.plugin.settings.highProgressColor;
+				}
+			} else {
+				// Use default color from settings
+				bar.style.backgroundColor = this.plugin.settings.barColor;
+			}
+
 			// Add percentage label
 			this.progressContainerEl.createEl("div", {
 				text: `${percent}% complete`,
@@ -587,7 +665,7 @@ class ProgressBarView extends View {
 		}
 	}
 
-	private displayError(error: any) {
+	private displayError(error: any): void {
 		if (!this.contentEl) return;
 
 		this.contentEl.empty();
@@ -601,6 +679,7 @@ class ProgressBarView extends View {
 // Settings tab
 class ProgressBarSettingTab extends PluginSettingTab {
 	plugin: ProgressBarPlugin;
+	private colorStateSettings: Setting[] = [];
 
 	constructor(app: App, plugin: ProgressBarPlugin) {
 		super(app, plugin);
@@ -615,7 +694,9 @@ class ProgressBarSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Bar Color")
-			.setDesc("Set the color of the progress bar")
+			.setDesc(
+				"Set the color of the progress bar (when color states are disabled)"
+			)
 			.addText((text) =>
 				text
 					.setPlaceholder("#5e81ac")
@@ -626,6 +707,90 @@ class ProgressBarSettingTab extends PluginSettingTab {
 					})
 			);
 
+		// Color states toggle
+		new Setting(containerEl)
+			.setName("Use Color States")
+			.setDesc("Change bar color based on progress percentage")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.useColorStates || false)
+					.onChange(async (value) => {
+						this.plugin.settings.useColorStates = value;
+						// Show/hide color state settings based on toggle
+						this.colorStateSettings.forEach((setting) => {
+							setting.settingEl.toggle(value);
+						});
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// Color state settings
+		const colorStateSettings: Setting[] = [];
+
+		// Low progress color (Red)
+		const lowProgressSetting = new Setting(containerEl)
+			.setName("Low Progress Color")
+			.setDesc("Color for 0-33% progress (default: red)")
+			.addText((text) =>
+				text
+					.setPlaceholder("#e06c75")
+					.setValue(
+						this.plugin.settings.lowProgressColor ||
+							DEFAULT_SETTINGS.lowProgressColor
+					)
+					.onChange(async (value) => {
+						this.plugin.settings.lowProgressColor = value;
+						await this.plugin.saveSettings();
+					})
+			);
+		colorStateSettings.push(lowProgressSetting);
+
+		// Medium progress color (Orange)
+		const mediumProgressSetting = new Setting(containerEl)
+			.setName("Medium Progress Color")
+			.setDesc("Color for 34-66% progress (default: orange)")
+			.addText((text) =>
+				text
+					.setPlaceholder("#e5c07b")
+					.setValue(
+						this.plugin.settings.mediumProgressColor ||
+							DEFAULT_SETTINGS.mediumProgressColor
+					)
+					.onChange(async (value) => {
+						this.plugin.settings.mediumProgressColor = value;
+						await this.plugin.saveSettings();
+					})
+			);
+		colorStateSettings.push(mediumProgressSetting);
+
+		// High progress color (Green)
+		const highProgressSetting = new Setting(containerEl)
+			.setName("High Progress Color")
+			.setDesc("Color for 67-100% progress (default: green)")
+			.addText((text) =>
+				text
+					.setPlaceholder("#98c379")
+					.setValue(
+						this.plugin.settings.highProgressColor ||
+							DEFAULT_SETTINGS.highProgressColor
+					)
+					.onChange(async (value) => {
+						this.plugin.settings.highProgressColor = value;
+						await this.plugin.saveSettings();
+					})
+			);
+		colorStateSettings.push(highProgressSetting);
+
+		// Save reference to settings for toggling visibility
+		this.colorStateSettings = colorStateSettings;
+
+		// Show/hide color state settings based on toggle state
+		const showColorSettings = this.plugin.settings.useColorStates || false;
+		colorStateSettings.forEach((setting) => {
+			setting.settingEl.toggle(showColorSettings);
+		});
+
+		// ...existing code for bar height, show task count, etc...
 		new Setting(containerEl)
 			.setName("Bar Height")
 			.setDesc("Set the height of the progress bar in pixels")
@@ -651,6 +816,48 @@ class ProgressBarSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.showTaskCount = value;
 						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Update Delay")
+			.setDesc("Set the delay (in ms) between updates when editing")
+			.addText((text) =>
+				text
+					.setPlaceholder("300")
+					.setValue(
+						String(
+							this.plugin.settings.debounceTime ||
+								DEFAULT_SETTINGS.debounceTime
+						)
+					)
+					.onChange(async (value) => {
+						const numValue = parseInt(value);
+						if (!isNaN(numValue) && numValue > 0) {
+							this.plugin.settings.debounceTime = numValue;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Reading View Update Delay")
+			.setDesc("Set the delay (in ms) between updates in reading view")
+			.addText((text) =>
+				text
+					.setPlaceholder("200")
+					.setValue(
+						String(
+							this.plugin.settings.readingViewDelay ||
+								DEFAULT_SETTINGS.readingViewDelay
+						)
+					)
+					.onChange(async (value) => {
+						const numValue = parseInt(value);
+						if (!isNaN(numValue) && numValue > 0) {
+							this.plugin.settings.readingViewDelay = numValue;
+							await this.plugin.saveSettings();
+						}
 					})
 			);
 	}
